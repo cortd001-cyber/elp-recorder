@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Recorder · English Language Check</title>
+<style>
+  :root { --navy:#1B3A5C; --teal:#2A9488; --ink:#1f2d3a; --muted:#5b6b7b; --line:#d6dee6; --red:#a83c32; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:Arial, Helvetica, sans-serif; color:var(--ink); background:#f5f7fa; font-size:17px; line-height:1.5; }
+  header { background:var(--navy); color:#fff; padding:12px 18px; font-weight:bold; display:flex; justify-content:space-between; }
+  main { padding:16px 18px; max-width:620px; margin:auto; }
+  .prompt { background:#eef3f8; border-left:5px solid var(--navy); padding:12px 14px; border-radius:8px; font-weight:bold; }
+  .pic { background:#fff; border:1px solid var(--line); border-radius:10px; padding:6px; margin-top:10px; } .pic img { display:block; width:100%; height:auto; max-height:380px; object-fit:contain; }
+  .big { font-size:42px; font-weight:bold; color:var(--navy); text-align:center; margin:12px 0 4px; }
+  .state { text-align:center; font-weight:bold; min-height:26px; }
+  .rec { color:var(--red); }
+  button { font:inherit; font-weight:bold; border:0; border-radius:999px; padding:12px 22px; cursor:pointer; }
+  .primary { background:var(--teal); color:#fff; } .stop { background:var(--red); color:#fff; } .ghost { background:#fff; border:1px solid var(--line); color:var(--navy); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .row { display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin:12px 0; }
+  .note { font-size:14px; color:var(--muted); text-align:center; }
+  .err { color:var(--red); font-weight:bold; text-align:center; }
+  audio { width:100%; margin-top:8px; }
+  .bar { height:8px; background:#e6ecf1; border-radius:99px; overflow:hidden; width:100%; } .bar i { display:block; height:100%; width:0; background:var(--teal); transition:width .3s; }
+</style>
+</head>
+<body>
+<header><span>🎙 Recorder · English Language Check</span><span id="cnt"></span></header>
+<main id="app"><p class="note">Getting your questions…</p></main>
+<script type="module">
+/* This page only records. It has no database and saves nothing.
+   Each recording goes straight back to the test window that opened this page.
+   The transcript is made on this computer (the speech model runs in the browser); the audio is never sent to an AI service. */
+const P = new URLSearchParams(location.search);
+const ORIGIN = P.get('o') || '';
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const app = $('#app');
+
+// Only Google Apps Script pages (or a local test page) may talk to this recorder.
+const validOrigin = /^https:\/\/[a-z0-9-]+\.googleusercontent\.com$/.test(ORIGIN) || /^https?:\/\/localhost(:\d+)?$/.test(ORIGIN);
+if (!window.opener || !validOrigin) { app.innerHTML = '<p class="err">Open the recorder from your English Language Check test.</p>'; throw new Error('no opener'); }
+
+let TASKS = [], idx = 0, stream = null, rec = null, chunks = [], blob = null, mime = '', seconds = 0, timer = null;
+window.addEventListener('message', e => {
+  if (e.origin !== ORIGIN || e.source !== window.opener || !e.data || e.data.type !== 'elp-tasks' || TASKS.length) return;
+  TASKS = (e.data.tasks || []).slice(0, 12).map(t => ({ id: String(t.id), n: Number(t.n), prompt: String(t.prompt || ''), image: String(t.image || ''),
+    prep: Math.min(120, Number(t.prep) || 20), max: Math.min(180, Number(t.max) || 60) }));
+  if (TASKS.length) intro(); else app.innerHTML = '<p class="err">There are no questions to record.</p>';
+});
+window.opener.postMessage({ type: 'elp-ready' }, ORIGIN);
+setTimeout(() => { if (!TASKS.length) app.innerHTML = '<p class="err">The test window did not answer. Close this window and press Start again.</p>'; }, 8000);
+
+function pickMime() { return ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'].find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || ''; }
+function tick(sec, onTick, onEnd) { let s = sec; onTick(s); clearInterval(timer); timer = setInterval(() => { s--; onTick(s); if (s <= 0) { clearInterval(timer); onEnd(); } }, 1000); }
+// Pictures are shown as images, so nothing inside them can run.
+const pic = svg => svg ? `<div class="pic"><img alt="Picture for this question" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}"></div>` : '';
+
+function intro() {
+  app.innerHTML = `<p><b>You will answer ${TASKS.length} question${TASKS.length > 1 ? 's' : ''}.</b></p>
+    <p>For each one, you will see the question and have a little time to think. Then the recorder starts. Press <b>Stop</b> when you finish.
+    You can listen to your answer and record it again once.</p><div class="row"><button class="primary" id="go">Turn on the microphone</button></div><p class="state" id="st"></p>`;
+  $('#go').onclick = async () => {
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) { $('#st').innerHTML = '<span class="err">The microphone is blocked. Click the microphone icon in the address bar, choose Allow, and try again.</span>'; return; }
+    showTask(false);
+  };
+}
+
+function showTask(retry) {
+  const T = TASKS[idx];
+  $('#cnt').textContent = 'Question ' + (idx + 1) + ' of ' + TASKS.length;
+  app.innerHTML = `<div class="prompt">${esc(T.prompt)}</div>${pic(T.image)}
+    <div class="big" id="t"></div><div class="state" id="st">Think about your answer…</div><div class="row" id="btns"><button class="ghost" id="ready">I am ready</button></div>`;
+  T.retry = retry;
+  $('#ready').onclick = () => { clearInterval(timer); record(); };
+  tick(T.prep, s => { $('#t').textContent = s + 's'; }, record);
+}
+
+function record() {
+  const T = TASKS[idx];
+  mime = pickMime(); chunks = [];
+  rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+  mime = rec.mimeType || mime || 'audio/webm';
+  rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  rec.onstop = () => { blob = new Blob(chunks, { type: mime }); review(); };
+  rec.start(); seconds = 0;
+  $('#st').innerHTML = '<span class="rec">● Recording. Speak now.</span>';
+  $('#btns').innerHTML = '<button class="stop" id="stop">■ Stop</button>';
+  $('#stop').onclick = () => { clearInterval(timer); rec.stop(); };
+  tick(T.max, s => { seconds = T.max - s; $('#t').textContent = s + 's'; }, () => { if (rec.state === 'recording') rec.stop(); });
+}
+
+function review() {
+  const T = TASKS[idx];
+  $('#t').textContent = ''; $('#st').textContent = 'Listen to your answer.';
+  $('#btns').innerHTML = `<audio controls src="${URL.createObjectURL(blob)}"></audio>
+    ${T.retry ? '' : '<button class="ghost" id="again">Record again</button>'}<button class="primary" id="use">Use this answer</button>`;
+  if (!T.retry) $('#again').onclick = () => showTask(true);
+  $('#use').onclick = () => transcribeAndSend(blob, mime, seconds);
+}
+
+/* ---- On-device transcript (free; the audio does not leave this computer) ---- */
+const CONNECTORS = ['because', 'so', 'but', 'however', 'for example', 'for instance', 'also', 'first', 'second', 'then', 'finally', 'in conclusion', 'another', 'although', 'since', 'therefore', 'in addition', 'on the other hand', 'i think', 'i believe', 'in my opinion'];
+function metrics(text, secs) {
+  const words = (text.toLowerCase().match(/[a-z']+/g) || []);
+  const t = ' ' + text.toLowerCase().replace(/[^a-z' ]/g, ' ').replace(/\s+/g, ' ') + ' ';
+  return { seconds: Math.round(secs), words: words.length, wordsPerMinute: secs ? Math.round(words.length / (secs / 60)) : 0,
+    differentWords: new Set(words).size, sentences: (text.match(/[.!?]+/g) || []).length || (words.length ? 1 : 0),
+    connectors: CONNECTORS.filter(c => t.includes(' ' + c + ' ')) };
+}
+async function toPcm16k(b) {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+  const buf = await ctx.decodeAudioData(await b.arrayBuffer());
+  const data = buf.getChannelData(0).slice(0); ctx.close();
+  return data;
+}
+let asrPromise = null;
+function asr() {
+  if (!asrPromise) asrPromise = import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1').then(({ pipeline, env }) => {
+    env.allowLocalModels = false; return pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny.en');
+  });
+  return asrPromise;
+}
+async function transcribeAndSend(b, m, secs) {
+  $('#btns').innerHTML = '<div class="bar"><i id="pb"></i></div><button class="ghost" id="skip" disabled>Continue without the transcript</button>';
+  $('#st').textContent = 'Saving your answer… (the first time can take a minute)';
+  let done = false;
+  const go = (text, mt) => { if (done) return; done = true; clearInterval(prog); send(b, m, text, mt); };
+  setTimeout(() => { const s = $('#skip'); if (s && !done) s.disabled = false; }, 15000);
+  $('#skip').onclick = () => go('', { seconds: Math.round(secs), note: 'no transcript' });
+  let p = 5; const prog = setInterval(() => { p = Math.min(92, p + 4); const el = $('#pb'); if (el) el.style.width = p + '%'; }, 1000);
+  try {
+    const model = await asr();
+    const out = await model(await toPcm16k(b), { chunk_length_s: 30, stride_length_s: 5 });
+    const text = String((out && out.text) || '').trim();
+    go(text, metrics(text, secs));
+  } catch (e) {
+    console.warn('Transcript not available:', e);
+    go('', { seconds: Math.round(secs), note: 'no transcript' });
+  }
+}
+function send(b, m, text, mt) {
+  const T = TASKS[idx], fr = new FileReader();
+  fr.onload = () => {
+    window.opener.postMessage({ type: 'elp-recording', id: T.id, b64: String(fr.result).split(',')[1], mime: m, transcript: text, metrics: mt }, ORIGIN);
+    idx++;
+    if (idx < TASKS.length) { showTask(false); return; }
+    stream.getTracks().forEach(t => t.stop());
+    $('#cnt').textContent = '';
+    app.innerHTML = '<p class="state" style="color:#1f7a70;font-size:22px;margin-top:40px">✓ Your answers were added to your test.</p><p class="note">This window will close. Go back to the test and press Send Speaking.</p>';
+    setTimeout(() => window.close(), 2500);
+  };
+  fr.readAsDataURL(b);
+}
+</script>
+</body>
+</html>
