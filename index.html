@@ -92,7 +92,9 @@ function micCheck() {
   meterStop = meter($('#lv'));
   $('#test').onclick = () => {
     const r = new MediaRecorder(stream), c = []; r.ondataavailable = e => c.push(e.data);
-    r.onstop = () => { $('#tp').innerHTML = `<audio controls autoplay src="${URL.createObjectURL(new Blob(c, { type: r.mimeType }))}"></audio><p class="note">Listen. Can you hear yourself?</p>`; $('#test').disabled = false; $('#test').textContent = '⏺ Test again'; $('#ok').disabled = false; };
+    r.onstop = () => { const a = new Audio(URL.createObjectURL(new Blob(c, { type: r.mimeType }))); a.play().catch(() => {});
+      $('#tp').innerHTML = `<div class="row"><button class="ghost" id="tplay">▶ Play my test</button></div><p class="note">Listen. Can you hear yourself?</p>`;
+      $('#tplay').onclick = () => { a.currentTime = 0; a.play().catch(() => {}); }; $('#test').disabled = false; $('#test').textContent = '⏺ Test again'; $('#ok').disabled = false; };
     r.start(); $('#test').disabled = true; $('#test').textContent = '● Recording the test…'; setTimeout(() => r.stop(), 4000);
   };
   $('#ok').onclick = () => { if (meterStop) meterStop(); showTask(false); };
@@ -100,20 +102,24 @@ function micCheck() {
 
 /* ---- Step 2: each question — Listen, Record, Stop ---- */
 function showTask(retry) {
-  const T = TASKS[idx]; T.retry = retry;
+  const T = TASKS[idx]; if (!retry) T.tries = 0;
   $('#cnt').textContent = 'Question ' + (idx + 1) + ' of ' + TASKS.length;
-  app.innerHTML = `<p style="margin:0 0 6px"><b>Question ${T.n}</b> · Listen to the question. It is not written on the screen.</p>
-    ${T.image ? pic(T.image) : '<div class="pic" style="text-align:center;font-size:64px;padding:30px 0">🎧</div>'}
-    <div class="row" id="btns"><button class="primary" id="listen">🔊 Listen to the question</button><button class="ghost" id="recb" disabled>🎙 Record</button></div>
-    <div class="state" id="st">First, listen to the question.</div>`;
-  let heard = false;
-  $('#listen').onclick = () => {
-    $('#listen').disabled = true; $('#listen').textContent = '🔊 Listening…';
-    const end = () => { const L = $('#listen'), R = $('#recb'); if (!L || !R) return; L.disabled = false; L.textContent = '🔊 Listen again';
-      if (!heard) { heard = true; R.disabled = false; R.className = 'primary'; L.className = 'ghost'; $('#st').textContent = 'When you are ready, press Record.'; } };
-    say(T.say, T.audio, end);
-    setTimeout(() => { if (!heard) end(); }, 25000);   // in case the voice does not finish
-  };
+  const top = `<p style="margin:0 0 6px"><b>Question ${T.n}</b> · ${retry ? 'You already heard the question.' : 'You will hear the question <b>one time</b>. It is not written on the screen. Listen carefully.'}</p>
+    ${T.image ? pic(T.image) : '<div class="pic" style="text-align:center;font-size:64px;padding:30px 0">🎧</div>'}`;
+  if (retry || T.heard) {   // the question plays only once: no Listen button after that
+    app.innerHTML = top + `<div class="row" id="btns"><button class="primary" id="recb">🎙 Record</button></div>
+      <div class="state" id="st">Press Record when you are ready.</div>`;
+  } else {
+    app.innerHTML = top + `<div class="row" id="btns"><button class="primary" id="listen">🔊 Listen to the question</button><button class="ghost" id="recb" disabled>🎙 Record</button></div>
+      <div class="state" id="st">Press Listen. You can listen only one time.</div>`;
+    $('#listen').onclick = () => {
+      const L = $('#listen'); L.disabled = true; L.textContent = '🔊 Listening…'; T.heard = true;
+      const end = () => { const L = $('#listen'), R = $('#recb'); if (!L || !R || !R.disabled) return;
+        L.textContent = '✓ Question played'; R.disabled = false; R.className = 'primary'; L.className = 'ghost'; $('#st').textContent = 'When you are ready, press Record.'; };
+      say(T.say, T.audio, end);
+      setTimeout(end, 25000);   // in case the voice does not finish
+    };
+  }
   $('#recb').onclick = () => { stopVoice(); record(); };
 }
 
@@ -123,7 +129,7 @@ function record() {
   rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
   mime = rec.mimeType || mime || 'audio/webm';
   rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
-  rec.onstop = () => { clearTimeout(guard); seconds = (Date.now() - started) / 1000; blob = new Blob(chunks, { type: mime }); review(); };
+  rec.onstop = () => { clearTimeout(guard); seconds = (Date.now() - started) / 1000; blob = new Blob(chunks, { type: mime }); T.tries = (T.tries || 0) + 1; review(); };
   rec.start(); started = Date.now();
   $('#st').innerHTML = '<span class="rec">● Recording. Speak now. Press Stop when you finish.</span>';
   $('#btns').innerHTML = '<button class="stop" id="stop">■ Stop</button>';
@@ -131,13 +137,23 @@ function record() {
   guard = setTimeout(() => { if (rec.state === 'recording') rec.stop(); }, T.max * 1000);   // hidden safety limit
 }
 
+const MAX_TRIES = 3;
 function review() {
   const T = TASKS[idx];
-  $('#st').textContent = 'Listen to your answer.';
-  $('#btns').innerHTML = `<audio controls src="${URL.createObjectURL(blob)}"></audio>
-    ${T.retry ? '' : '<button class="ghost" id="again">Record again</button>'}<button class="primary" id="use">Use this answer</button>`;
-  if (!T.retry) $('#again').onclick = () => showTask(true);
-  $('#use').onclick = () => transcribeAndSend(blob, mime, seconds);
+  if (T.tries >= MAX_TRIES) {   // third recording: it is the answer, go on automatically
+    $('#st').textContent = 'That was your last try. Your answer is saved.';
+    $('#btns').innerHTML = '';
+    setTimeout(() => transcribeAndSend(blob, mime, seconds), 1200);
+    return;
+  }
+  const left = MAX_TRIES - T.tries;
+  const player = new Audio(URL.createObjectURL(blob));
+  $('#st').textContent = 'Listen to your answer. You can record ' + left + ' more ' + (left === 1 ? 'time' : 'times') + '.';
+  $('#btns').innerHTML = `<button class="ghost" id="play">▶ Listen to my answer</button>
+    <button class="ghost" id="again">Record again</button><button class="primary" id="use">Use this answer</button>`;
+  $('#play').onclick = () => { player.currentTime = 0; player.play().catch(() => {}); };
+  $('#again').onclick = () => { player.pause(); showTask(true); };
+  $('#use').onclick = () => { player.pause(); transcribeAndSend(blob, mime, seconds); };
 }
 
 /* ---- On-device transcript (free; the audio does not leave this computer) ---- */
