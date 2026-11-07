@@ -13,8 +13,7 @@
   main { padding:16px 18px; max-width:620px; margin:auto; }
   .prompt { background:#eef3f8; border-left:5px solid var(--navy); padding:12px 14px; border-radius:8px; font-weight:bold; }
   .pic { background:#fff; border:1px solid var(--line); border-radius:10px; padding:6px; margin-top:10px; } .pic img { display:block; width:100%; height:auto; max-height:380px; object-fit:contain; }
-  .big { font-size:42px; font-weight:bold; color:var(--navy); text-align:center; margin:12px 0 4px; }
-  .state { text-align:center; font-weight:bold; min-height:26px; }
+  .state { text-align:center; font-weight:bold; min-height:26px; margin-top:6px; }
   .rec { color:var(--red); }
   button { font:inherit; font-weight:bold; border:0; border-radius:999px; padding:12px 22px; cursor:pointer; }
   .primary { background:var(--teal); color:#fff; } .stop { background:var(--red); color:#fff; } .ghost { background:#fff; border:1px solid var(--line); color:var(--navy); }
@@ -43,40 +42,79 @@ const app = $('#app');
 const validOrigin = /^https:\/\/[a-z0-9-]+\.googleusercontent\.com$/.test(ORIGIN) || /^https?:\/\/localhost(:\d+)?$/.test(ORIGIN);
 if (!window.opener || !validOrigin) { app.innerHTML = '<p class="err">Open the recorder from your English Language Check test.</p>'; throw new Error('no opener'); }
 
-let TASKS = [], idx = 0, stream = null, rec = null, chunks = [], blob = null, mime = '', seconds = 0, timer = null;
+let TASKS = [], idx = 0, stream = null, rec = null, chunks = [], blob = null, mime = '', started = 0, seconds = 0, guard = null, player = null;
 window.addEventListener('message', e => {
   if (e.origin !== ORIGIN || e.source !== window.opener || !e.data || e.data.type !== 'elp-tasks' || TASKS.length) return;
-  TASKS = (e.data.tasks || []).slice(0, 12).map(t => ({ id: String(t.id), n: Number(t.n), prompt: String(t.prompt || ''), image: String(t.image || ''),
-    prep: Math.min(120, Number(t.prep) || 20), max: Math.min(180, Number(t.max) || 60) }));
+  const okSrc = (v, kind) => (typeof v === 'string' && v.indexOf('data:' + kind + '/') === 0) ? v : '';
+  TASKS = (e.data.tasks || []).slice(0, 15).map(t => ({ id: String(t.id), n: Number(t.n), say: String(t.say || ''),
+    image: okSrc(t.image, 'image'), audio: okSrc(t.audio, 'audio'), max: Math.min(240, Number(t.max) || 90) }));
   if (TASKS.length) intro(); else app.innerHTML = '<p class="err">There are no questions to record.</p>';
 });
 window.opener.postMessage({ type: 'elp-ready' }, ORIGIN);
 setTimeout(() => { if (!TASKS.length) app.innerHTML = '<p class="err">The test window did not answer. Close this window and press Start again.</p>'; }, 8000);
 
 function pickMime() { return ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'].find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || ''; }
-function tick(sec, onTick, onEnd) { let s = sec; onTick(s); clearInterval(timer); timer = setInterval(() => { s--; onTick(s); if (s <= 0) { clearInterval(timer); onEnd(); } }, 1000); }
-// Pictures are shown as images, so nothing inside them can run.
-const pic = svg => svg ? `<div class="pic"><img alt="Picture for this question" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}"></div>` : '';
+const pic = src => src ? `<div class="pic"><img alt="Picture for this question" src="${src}"></div>` : '';
+function stopVoice() { try { if (player) player.pause(); } catch (e) {} try { speechSynthesis.cancel(); } catch (e) {} player = null; }
+function say(text, src, onEnd) {
+  stopVoice();
+  if (src) { player = new Audio(src); player.onended = onEnd; player.play().catch(onEnd); return; }
+  const u = new SpeechSynthesisUtterance(text); u.lang = 'en-US'; u.rate = 0.9;
+  const v = speechSynthesis.getVoices().find(v => /en-US/.test(v.lang)); if (v) u.voice = v;
+  u.onend = onEnd; u.onerror = onEnd; speechSynthesis.speak(u);
+}
 
+/* ---- Step 1: microphone check ---- */
+let meterStop = null;
+function meter(el) {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)(), an = ctx.createAnalyser(), data = new Uint8Array(256);
+  ctx.createMediaStreamSource(stream).connect(an); an.fftSize = 512; let on = true;
+  (function loop() { if (!on) return; an.getByteTimeDomainData(data); let m = 0; data.forEach(v => { m = Math.max(m, Math.abs(v - 128)); });
+    el.style.width = Math.min(100, m * 1.6) + '%'; requestAnimationFrame(loop); })();
+  return () => { on = false; ctx.close(); };
+}
 function intro() {
-  app.innerHTML = `<p><b>You will answer ${TASKS.length} question${TASKS.length > 1 ? 's' : ''}.</b></p>
-    <p>For each one, you will see the question and have a little time to think. Then the recorder starts. Press <b>Stop</b> when you finish.
-    You can listen to your answer and record it again once.</p><div class="row"><button class="primary" id="go">Turn on the microphone</button></div><p class="state" id="st"></p>`;
+  app.innerHTML = `<p><b>You will answer ${TASKS.length} question${TASKS.length > 1 ? 's' : ''}.</b> For each one: <b>listen</b> to the question, press <b>Record</b>, answer, and press <b>Stop</b>.
+    There is no timer. Take your time.</p><p><b>First, let’s check your microphone.</b></p>
+    <div class="row"><button class="primary" id="go">🎙 Turn on the microphone</button></div><p class="state" id="st"></p>`;
   $('#go').onclick = async () => {
     try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
     catch (e) { $('#st').innerHTML = '<span class="err">The microphone is blocked. Click the microphone icon in the address bar, choose Allow, and try again.</span>'; return; }
-    showTask(false);
+    micCheck();
   };
 }
+function micCheck() {
+  app.innerHTML = `<p><b>Microphone check</b></p><p>Say: <i>"My name is … and I am ready."</i> The green bar should move when you talk.</p>
+    <div class="bar" style="height:16px"><i id="lv"></i></div>
+    <div class="row"><button class="ghost" id="test">⏺ Record a 4-second test</button></div><div id="tp"></div>
+    <div class="row"><button class="primary" id="ok" disabled>✓ My microphone works. Start the questions</button></div>
+    <p class="note">If the bar does not move, check that the right microphone is selected, or tell your teacher.</p>`;
+  meterStop = meter($('#lv'));
+  $('#test').onclick = () => {
+    const r = new MediaRecorder(stream), c = []; r.ondataavailable = e => c.push(e.data);
+    r.onstop = () => { $('#tp').innerHTML = `<audio controls autoplay src="${URL.createObjectURL(new Blob(c, { type: r.mimeType }))}"></audio><p class="note">Listen. Can you hear yourself?</p>`; $('#test').disabled = false; $('#test').textContent = '⏺ Test again'; $('#ok').disabled = false; };
+    r.start(); $('#test').disabled = true; $('#test').textContent = '● Recording the test…'; setTimeout(() => r.stop(), 4000);
+  };
+  $('#ok').onclick = () => { if (meterStop) meterStop(); showTask(false); };
+}
 
+/* ---- Step 2: each question — Listen, Record, Stop ---- */
 function showTask(retry) {
-  const T = TASKS[idx];
+  const T = TASKS[idx]; T.retry = retry;
   $('#cnt').textContent = 'Question ' + (idx + 1) + ' of ' + TASKS.length;
-  app.innerHTML = `<div class="prompt">${esc(T.prompt)}</div>${pic(T.image)}
-    <div class="big" id="t"></div><div class="state" id="st">Think about your answer…</div><div class="row" id="btns"><button class="ghost" id="ready">I am ready</button></div>`;
-  T.retry = retry;
-  $('#ready').onclick = () => { clearInterval(timer); record(); };
-  tick(T.prep, s => { $('#t').textContent = s + 's'; }, record);
+  app.innerHTML = `<p style="margin:0 0 6px"><b>Question ${T.n}</b> · Listen to the question. It is not written on the screen.</p>
+    ${T.image ? pic(T.image) : '<div class="pic" style="text-align:center;font-size:64px;padding:30px 0">🎧</div>'}
+    <div class="row" id="btns"><button class="primary" id="listen">🔊 Listen to the question</button><button class="ghost" id="recb" disabled>🎙 Record</button></div>
+    <div class="state" id="st">First, listen to the question.</div>`;
+  let heard = false;
+  $('#listen').onclick = () => {
+    $('#listen').disabled = true; $('#listen').textContent = '🔊 Listening…';
+    const end = () => { const L = $('#listen'), R = $('#recb'); if (!L || !R) return; L.disabled = false; L.textContent = '🔊 Listen again';
+      if (!heard) { heard = true; R.disabled = false; R.className = 'primary'; L.className = 'ghost'; $('#st').textContent = 'When you are ready, press Record.'; } };
+    say(T.say, T.audio, end);
+    setTimeout(() => { if (!heard) end(); }, 25000);   // in case the voice does not finish
+  };
+  $('#recb').onclick = () => { stopVoice(); record(); };
 }
 
 function record() {
@@ -85,17 +123,17 @@ function record() {
   rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
   mime = rec.mimeType || mime || 'audio/webm';
   rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
-  rec.onstop = () => { blob = new Blob(chunks, { type: mime }); review(); };
-  rec.start(); seconds = 0;
-  $('#st').innerHTML = '<span class="rec">● Recording. Speak now.</span>';
+  rec.onstop = () => { clearTimeout(guard); seconds = (Date.now() - started) / 1000; blob = new Blob(chunks, { type: mime }); review(); };
+  rec.start(); started = Date.now();
+  $('#st').innerHTML = '<span class="rec">● Recording. Speak now. Press Stop when you finish.</span>';
   $('#btns').innerHTML = '<button class="stop" id="stop">■ Stop</button>';
-  $('#stop').onclick = () => { clearInterval(timer); rec.stop(); };
-  tick(T.max, s => { seconds = T.max - s; $('#t').textContent = s + 's'; }, () => { if (rec.state === 'recording') rec.stop(); });
+  $('#stop').onclick = () => { if (rec.state === 'recording') rec.stop(); };
+  guard = setTimeout(() => { if (rec.state === 'recording') rec.stop(); }, T.max * 1000);   // hidden safety limit
 }
 
 function review() {
   const T = TASKS[idx];
-  $('#t').textContent = ''; $('#st').textContent = 'Listen to your answer.';
+  $('#st').textContent = 'Listen to your answer.';
   $('#btns').innerHTML = `<audio controls src="${URL.createObjectURL(blob)}"></audio>
     ${T.retry ? '' : '<button class="ghost" id="again">Record again</button>'}<button class="primary" id="use">Use this answer</button>`;
   if (!T.retry) $('#again').onclick = () => showTask(true);
