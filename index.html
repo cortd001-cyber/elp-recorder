@@ -55,10 +55,20 @@ setTimeout(() => { if (!TASKS.length) app.innerHTML = '<p class="err">The test w
 
 function pickMime() { return ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'].find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || ''; }
 const pic = src => src ? `<div class="pic"><img alt="Picture for this question" src="${src}"></div>` : '';
-function stopVoice() { try { if (player) player.pause(); } catch (e) {} try { speechSynthesis.cancel(); } catch (e) {} player = null; }
+function stopVoice() { stoppingVoice = true; try { if (player) player.pause(); } catch (e) {} try { speechSynthesis.cancel(); } catch (e) {} player = null; stoppingVoice = false; }
+// Keyboard media keys (play/pause, next/previous track) must not pause or skip the questions.
+(function blockMediaKeys() {
+  if (!('mediaSession' in navigator)) return;
+  ['play', 'pause', 'stop', 'seekbackward', 'seekforward', 'seekto', 'previoustrack', 'nexttrack'].forEach(k => { try { navigator.mediaSession.setActionHandler(k, () => {}); } catch (e) {} });
+})();
+let stoppingVoice = false;
 function say(text, src, onEnd) {
   stopVoice();
-  if (src) { player = new Audio(src); player.onended = onEnd; player.play().catch(onEnd); return; }
+  if (src) {
+    const p = player = new Audio(src); p.onended = onEnd;
+    p.onpause = () => { if (!p.ended && !stoppingVoice && player === p) p.play().catch(() => {}); };   // no pausing
+    p.play().catch(onEnd); return;
+  }
   const u = new SpeechSynthesisUtterance(text); u.lang = 'en-US'; u.rate = 0.9;
   const v = speechSynthesis.getVoices().find(v => /en-US/.test(v.lang)); if (v) u.voice = v;
   u.onend = onEnd; u.onerror = onEnd; speechSynthesis.speak(u);
@@ -104,22 +114,19 @@ function micCheck() {
 function showTask(retry) {
   const T = TASKS[idx]; if (!retry) T.tries = 0;
   $('#cnt').textContent = 'Question ' + (idx + 1) + ' of ' + TASKS.length;
-  const top = `<p style="margin:0 0 6px"><b>Question ${T.n}</b> · ${retry ? 'You already heard the question.' : 'You will hear the question <b>one time</b>. It is not written on the screen. Listen carefully.'}</p>
-    ${T.image ? pic(T.image) : '<div class="pic" style="text-align:center;font-size:64px;padding:30px 0">🎧</div>'}`;
-  if (retry || T.heard) {   // the question plays only once: no Listen button after that
-    app.innerHTML = top + `<div class="row" id="btns"><button class="primary" id="recb">🎙 Record</button></div>
-      <div class="state" id="st">Press Record when you are ready.</div>`;
-  } else {
-    app.innerHTML = top + `<div class="row" id="btns"><button class="primary" id="listen">🔊 Listen to the question</button><button class="ghost" id="recb" disabled>🎙 Record</button></div>
-      <div class="state" id="st">Press Listen. You can listen only one time.</div>`;
-    $('#listen').onclick = () => {
-      const L = $('#listen'); L.disabled = true; L.textContent = '🔊 Listening…'; T.heard = true;
-      const end = () => { const L = $('#listen'), R = $('#recb'); if (!L || !R || !R.disabled) return;
-        L.textContent = '✓ Question played'; R.disabled = false; R.className = 'primary'; L.className = 'ghost'; $('#st').textContent = 'When you are ready, press Record.'; };
-      say(T.say, T.audio, end);
-      setTimeout(end, 25000);   // in case the voice does not finish
-    };
-  }
+  const heard = retry || T.heard;
+  app.innerHTML = `<p style="margin:0 0 6px"><b>Question ${T.n}</b> · Listen to the question. It is not written on the screen.${heard ? ' You can listen to it again.' : ''}</p>
+    ${T.image ? pic(T.image) : '<div class="pic" style="text-align:center;font-size:64px;padding:30px 0">🎧</div>'}
+    <div class="row" id="btns"><button class="${heard ? 'ghost' : 'primary'}" id="listen">🔊 ${heard ? 'Listen again' : 'Listen to the question'}</button><button class="${heard ? 'primary' : 'ghost'}" id="recb" ${heard ? '' : 'disabled'}>🎙 Record</button></div>
+    <div class="state" id="st">${heard ? 'Press Record when you are ready.' : 'First, listen to the question.'}</div>`;
+  $('#listen').onclick = () => {
+    const L = $('#listen'); L.disabled = true; L.textContent = '🔊 Listening…'; T.heard = true;
+    let ended = false;
+    const end = () => { if (ended) return; ended = true; const L = $('#listen'), R = $('#recb'); if (!L || !R) return;
+      L.disabled = false; L.textContent = '🔊 Listen again'; L.className = 'ghost'; R.disabled = false; R.className = 'primary'; $('#st').textContent = 'When you are ready, press Record.'; };
+    say(T.say, T.audio, end);
+    setTimeout(end, 25000);   // in case the voice does not finish
+  };
   $('#recb').onclick = () => { stopVoice(); record(); };
 }
 
