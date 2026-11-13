@@ -88,6 +88,8 @@ function meter(el) {
   return () => { on = false; ctx.close(); };
 }
 function intro() {
+  setTimeout(() => asr().catch(() => {}), 1500);   // start downloading the speech model early
+
   app.innerHTML = `<p><b>You will answer ${TASKS.length} question${TASKS.length > 1 ? 's' : ''}.</b> For each one: <b>listen</b> to the question, press <b>Record</b>, answer, and press <b>Stop</b>.
     There is no timer. Take your time.</p><p><b>First, let’s check your microphone.</b></p>
     <div class="row"><button class="primary" id="go">🎙 Turn on the microphone</button></div><p class="state" id="st"></p>`;
@@ -141,8 +143,8 @@ function record() {
   rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
   mime = rec.mimeType || mime || 'audio/webm';
   rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
-  rec.onstop = () => { clearTimeout(guard); seconds = (Date.now() - started) / 1000; blob = new Blob(chunks, { type: mime }); T.tries = (T.tries || 0) + 1; review(); };
-  rec.start(); started = Date.now();
+  rec.onstop = () => { recording = false; setTimeout(runQueue, 300); clearTimeout(guard); seconds = (Date.now() - started) / 1000; blob = new Blob(chunks, { type: mime }); T.tries = (T.tries || 0) + 1; review(); };
+  recording = true; rec.start(); started = Date.now();
   $('#st').innerHTML = '<span class="rec">● Recording. Speak now. Press Stop when you finish.</span>';
   $('#btns').innerHTML = '<button class="stop" id="stop">■ Stop</button>';
   $('#stop').onclick = () => { if (rec.state === 'recording') rec.stop(); };
@@ -190,36 +192,52 @@ function asr() {
   });
   return asrPromise;
 }
-async function transcribeAndSend(b, m, secs) {
-  $('#btns').innerHTML = '<div class="bar"><i id="pb"></i></div><button class="ghost" id="skip" disabled>Continue without the transcript</button>';
-  $('#st').textContent = 'Saving your answer… (the first time can take a minute)';
-  let done = false;
-  const go = (text, mt) => { if (done) return; done = true; clearInterval(prog); send(b, m, text, mt); };
-  setTimeout(() => { const s = $('#skip'); if (s && !done) s.disabled = false; }, 15000);
-  $('#skip').onclick = () => go('', { seconds: Math.round(secs), note: 'no transcript' });
-  let p = 5; const prog = setInterval(() => { p = Math.min(92, p + 4); const el = $('#pb'); if (el) el.style.width = p + '%'; }, 1000);
-  try {
-    const model = await asr();
-    const out = await model(await toPcm16k(b), { chunk_length_s: 30, stride_length_s: 5 });
-    const text = String((out && out.text) || '').trim();
-    go(text, metrics(text, secs));
-  } catch (e) {
-    console.warn('Transcript not available:', e);
-    go('', { seconds: Math.round(secs), note: 'no transcript' });
-  }
-}
-function send(b, m, text, mt) {
+/* The answer is saved right away and the student goes on. The transcript is made later, in this window,
+   one answer at a time (never while the student is recording), and then sent to the test with the same audio. */
+let recording = false, working = false;
+const QUEUE = [];
+function transcribeAndSend(b, m, secs) {
   const T = TASKS[idx], fr = new FileReader();
   fr.onload = () => {
-    window.opener.postMessage({ type: 'elp-recording', id: T.id, b64: String(fr.result).split(',')[1], mime: m, transcript: text, metrics: mt }, ORIGIN);
-    idx++;
-    if (idx < TASKS.length) { showTask(false); return; }
-    stream.getTracks().forEach(t => t.stop());
-    $('#cnt').textContent = '';
-    app.innerHTML = '<p class="state" style="color:#2b2b30;font-size:22px;margin-top:40px">✓ Your answers were added to your test.</p><p class="note">This window will close. Go back to the test and press Send Speaking.</p>';
-    setTimeout(() => window.close(), 2500);
+    const b64 = String(fr.result).split(',')[1];
+    QUEUE.push({ id: T.id, b64, m, secs, blob: b });
+    send(b64, m, '', { seconds: Math.round(secs), note: 'transcript pending' });
+    setTimeout(runQueue, 300);
   };
   fr.readAsDataURL(b);
+}
+async function runQueue() {
+  if (working || recording || !QUEUE.length) return;
+  working = true; const job = QUEUE[0];
+  let text = '', mt = { seconds: Math.round(job.secs), note: 'no transcript' };
+  try {
+    const model = await asr();
+    const out = await model(await toPcm16k(job.blob), { chunk_length_s: 30, stride_length_s: 5 });
+    text = String((out && out.text) || '').trim(); mt = metrics(text, job.secs);
+  } catch (e) { console.warn('Transcript not available:', e); }
+  window.opener && !window.opener.closed && window.opener.postMessage({ type: 'elp-recording', id: job.id, b64: job.b64, mime: job.m, transcript: text, metrics: mt }, ORIGIN);
+  QUEUE.shift(); working = false; finishing();
+  setTimeout(runQueue, 200);
+}
+window.addEventListener('beforeunload', e => { if (QUEUE.length) { e.preventDefault(); e.returnValue = ''; } });
+function finishing() {
+  if (idx < TASKS.length) return;
+  if (QUEUE.length) {
+    app.innerHTML = `<p class="state" style="color:#2b2b30;font-size:22px;margin-top:40px">✓ All your answers are saved.</p>
+      <p class="note">Please wait. Do not close this window. Finishing your answers… (${QUEUE.length} left)</p><div class="bar"><i style="width:${Math.round((1 - QUEUE.length / TASKS.length) * 100)}%"></i></div>`;
+    return;
+  }
+  app.innerHTML = '<p class="state" style="color:#2b2b30;font-size:22px;margin-top:40px">✓ Your answers were added to your test.</p><p class="note">This window will close. Go back to the test and click the arrow to send Speaking.</p>';
+  setTimeout(() => window.close(), 2500);
+}
+function send(b64, m, text, mt) {
+  const T = TASKS[idx];
+  window.opener.postMessage({ type: 'elp-recording', id: T.id, b64, mime: m, transcript: text, metrics: mt }, ORIGIN);
+  idx++;
+  if (idx < TASKS.length) { showTask(false); return; }
+  stream.getTracks().forEach(t => t.stop());
+  $('#cnt').textContent = '';
+  finishing();
 }
 </script>
 </body>
