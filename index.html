@@ -4,19 +4,22 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Recorder · English Language Check</title>
+<title>Voice Recorder · ELP Benchmark</title>
 <style>
-  :root { --navy:#1B3A5C; --teal:#2A9488; --ink:#1f2d3a; --muted:#5b6b7b; --line:#d6dee6; --red:#a83c32; }
+  :root { --navy:#2b2b30; --teal:#2b2b30; --ink:#1d1d21; --muted:#5f6368; --line:#d8d8de; --red:#b3333a; }
   * { box-sizing:border-box; }
-  body { margin:0; font-family:Arial, Helvetica, sans-serif; color:var(--ink); background:#f5f7fa; font-size:17px; line-height:1.5; }
-  header { background:var(--navy); color:#fff; padding:12px 18px; font-weight:bold; display:flex; justify-content:space-between; }
+  body { margin:0; font-family:Arial, Helvetica, sans-serif; color:var(--ink); background:#fff; font-size:17px; line-height:1.5; }
+  .brand { display:flex; align-items:center; gap:10px; padding:10px 18px; font-size:20px; font-weight:bold; } .brand b { color:var(--red); }
+  header { background:var(--navy); color:#fff; padding:10px 18px; font-weight:bold; display:flex; justify-content:space-between; border-bottom:3px solid var(--red); }
+  main { border:3px solid var(--navy); margin:14px; }
   main { padding:16px 18px; max-width:620px; margin:auto; }
   .prompt { background:#eef3f8; border-left:5px solid var(--navy); padding:12px 14px; border-radius:8px; font-weight:bold; }
   .pic { background:#fff; border:1px solid var(--line); border-radius:10px; padding:6px; margin-top:10px; } .pic img { display:block; width:100%; height:auto; max-height:380px; object-fit:contain; }
   .state { text-align:center; font-weight:bold; min-height:26px; margin-top:6px; }
   .rec { color:var(--red); }
-  button { font:inherit; font-weight:bold; border:0; border-radius:999px; padding:12px 22px; cursor:pointer; }
-  .primary { background:var(--teal); color:#fff; } .stop { background:var(--red); color:#fff; } .ghost { background:#fff; border:1px solid var(--line); color:var(--navy); }
+  button { font:inherit; font-weight:bold; border:2px solid var(--navy); border-radius:8px; padding:11px 22px; cursor:pointer; }
+  .primary { background:var(--navy); color:#fff; } .stop { background:var(--red); border-color:var(--red); color:#fff; } .ghost { background:#fff; color:var(--navy); }
+  #recb.primary { background:#fff; color:var(--navy); } #recb.primary::before { content:''; display:inline-block; width:14px; height:14px; border-radius:50%; background:var(--red); margin-right:8px; vertical-align:-1px; }
   button:disabled { opacity:.5; cursor:not-allowed; }
   .row { display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin:12px 0; }
   .note { font-size:14px; color:var(--muted); text-align:center; }
@@ -26,7 +29,8 @@
 </style>
 </head>
 <body>
-<header><span>🎙 Recorder · English Language Check</span><span id="cnt"></span></header>
+<div class="brand"><svg width="36" height="36" viewBox="0 0 44 44" aria-hidden="true"><rect x="1" y="1" width="42" height="42" rx="10" fill="#b3333a"/><path d="M11 12h22a3 3 0 0 1 3 3v11a3 3 0 0 1-3 3H20l-6 5v-5h-3a3 3 0 0 1-3-3V15a3 3 0 0 1 3-3z" fill="#fff"/><path d="M15 21.5l4 4 9-9" fill="none" stroke="#2b2b30" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span><b>ELP</b> Benchmark · Voice Recorder</span></div>
+<header><span>Speaking</span><span id="cnt"></span></header>
 <main id="app"><p class="note">Getting your questions…</p></main>
 <script type="module">
 /* This page only records. It has no database and saves nothing.
@@ -117,8 +121,9 @@ function showTask(retry) {
   const heard = retry || T.heard;
   app.innerHTML = `<p style="margin:0 0 6px"><b>Question ${T.n}</b> · Listen to the question. It is not written on the screen.${heard ? ' You can listen to it again.' : ''}</p>
     ${T.image ? pic(T.image) : '<div class="pic" style="text-align:center;font-size:64px;padding:30px 0">🎧</div>'}
-    <div class="row" id="btns"><button class="${heard ? 'ghost' : 'primary'}" id="listen">🔊 ${heard ? 'Listen again' : 'Listen to the question'}</button><button class="${heard ? 'primary' : 'ghost'}" id="recb" ${heard ? '' : 'disabled'}>🎙 Record</button></div>
-    <div class="state" id="st">${heard ? 'Press Record when you are ready.' : 'First, listen to the question.'}</div>`;
+    <div class="row" id="btns"><button class="${heard ? 'ghost' : 'primary'}" id="listen">🔊 ${heard ? 'Listen again' : 'Listen to the question'}</button><button class="${heard ? 'primary' : 'ghost'}" id="recb" ${heard ? '' : 'disabled'}>Record</button></div>
+    <div class="state" id="st">${heard ? 'Press Record when you are ready.' : 'First, listen to the question.'}</div>
+    <p class="note">You have 3 tries for each question.</p>`;
   $('#listen').onclick = () => {
     const L = $('#listen'); L.disabled = true; L.textContent = '🔊 Listening…'; T.heard = true;
     let ended = false;
@@ -211,7 +216,7 @@ function send(b, m, text, mt) {
     if (idx < TASKS.length) { showTask(false); return; }
     stream.getTracks().forEach(t => t.stop());
     $('#cnt').textContent = '';
-    app.innerHTML = '<p class="state" style="color:#1f7a70;font-size:22px;margin-top:40px">✓ Your answers were added to your test.</p><p class="note">This window will close. Go back to the test and press Send Speaking.</p>';
+    app.innerHTML = '<p class="state" style="color:#2b2b30;font-size:22px;margin-top:40px">✓ Your answers were added to your test.</p><p class="note">This window will close. Go back to the test and press Send Speaking.</p>';
     setTimeout(() => window.close(), 2500);
   };
   fr.readAsDataURL(b);
