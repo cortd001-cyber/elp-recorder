@@ -26,6 +26,8 @@
   .err { color:var(--red); font-weight:bold; text-align:center; }
   audio { width:100%; margin-top:8px; }
   .bar { height:8px; background:#e6ecf1; border-radius:99px; overflow:hidden; width:100%; } .bar i { display:block; height:100%; width:0; background:var(--teal); transition:width .3s; }
+  #pz { position:fixed; inset:0; z-index:50; background:rgba(43,43,48,.94); color:#fff; display:flex; align-items:center; justify-content:center; text-align:center; padding:20px; }
+  #pz h1 { font-size:26px; margin:8px 0; } #pz p { color:#ddd; }
 </style>
 </head>
 <body>
@@ -47,13 +49,37 @@ const validOrigin = /^https:\/\/[a-z0-9-]+\.googleusercontent\.com$/.test(ORIGIN
 if (!window.opener || !validOrigin) { app.innerHTML = '<p class="err">Open the recorder from your English Language Check test.</p>'; throw new Error('no opener'); }
 
 let TASKS = [], idx = 0, stream = null, rec = null, chunks = [], blob = null, mime = '', started = 0, seconds = 0, guard = null, player = null;
+let scr = 'start', waitRetry = false, paused = false, discard = false, afterDiscard = false, revPlayer = null;
+const okSrc = (v, kind) => (typeof v === 'string' && v.indexOf('data:' + kind + '/') === 0) ? v : '';
 window.addEventListener('message', e => {
-  if (e.origin !== ORIGIN || e.source !== window.opener || !e.data || e.data.type !== 'elp-tasks' || TASKS.length) return;
-  const okSrc = (v, kind) => (typeof v === 'string' && v.indexOf('data:' + kind + '/') === 0) ? v : '';
-  TASKS = (e.data.tasks || []).slice(0, 15).map(t => ({ id: String(t.id), n: Number(t.n), say: String(t.say || ''),
-    image: okSrc(t.image, 'image'), audio: okSrc(t.audio, 'audio'), max: Math.min(240, Number(t.max) || 90) }));
-  if (TASKS.length) intro(); else app.innerHTML = '<p class="err">There are no questions to record.</p>';
+  if (e.origin !== ORIGIN || e.source !== window.opener || !e.data) return;
+  const d = e.data;
+  if (d.type === 'elp-tasks' && !TASKS.length) {
+    TASKS = (d.tasks || []).slice(0, 15).map(t => ({ id: String(t.id), n: Number(t.n), say: String(t.say || ''),
+      image: okSrc(t.image, 'image'), audio: okSrc(t.audio, 'audio'), max: Math.min(240, Number(t.max) || 90), wait: !!t.wait }));
+    if (TASKS.length) intro(); else app.innerHTML = '<p class="err">There are no questions to record.</p>';
+  }
+  if (d.type === 'elp-item') {   // a question's sound and picture arrived (they come one at a time)
+    const T = TASKS.find(t => t.id === String(d.id)); if (!T) return;
+    if (d.failed) { T.failed = true; } else { Object.assign(T, { audio: okSrc(d.audio, 'audio'), say: String(d.say || ''), image: okSrc(d.image, 'image'), wait: false, failed: false }); }
+    if (scr === 'wait' && TASKS[idx] === T) showTask(waitRetry);
+  }
+  if (d.type === 'elp-pause') pauseNow(d.by);
+  if (d.type === 'elp-resume') resumeNow();
+  if (d.type === 'elp-close') { QUEUE.length = 0; stopVoice(); try { if (rec && rec.state === 'recording') { discard = true; rec.stop(); } } catch (x) {} try { stream && stream.getTracks().forEach(t => t.stop()); } catch (x) {} window.close(); }
 });
+/* The teacher (or the student) paused the test: this window is paused too. A recording that was going on is not kept and does not count as a try. */
+function pauseNow(by) {
+  paused = true; stopVoice(); try { if (revPlayer) revPlayer.pause(); } catch (x) {}
+  if (rec && rec.state === 'recording') { discard = true; rec.stop(); }
+  let c = $('#pz'); if (!c) { c = document.createElement('div'); c.id = 'pz'; document.body.appendChild(c); }
+  c.innerHTML = by === 'teacher' ? '<div><div style="font-size:52px">⏸</div><h1>Your teacher paused the test</h1><p>Please wait. Your answers are saved.</p></div>'
+    : '<div><div style="font-size:52px">⏸</div><h1>The test is paused</h1><p>Your answers are saved. Go back to the test window to continue.</p></div>';
+}
+function resumeNow() {
+  if (!paused) return; paused = false; const c = $('#pz'); if (c) c.remove();
+  if (afterDiscard) { afterDiscard = false; showTask(true); }   // back to the same question
+}
 window.opener.postMessage({ type: 'elp-ready' }, ORIGIN);
 setTimeout(() => { if (!TASKS.length) app.innerHTML = '<p class="err">The test window did not answer. Close this window and press Start again.</p>'; }, 8000);
 
@@ -118,7 +144,16 @@ function micCheck() {
 
 /* ---- Step 2: each question — Listen, Record, Stop ---- */
 function showTask(retry) {
-  const T = TASKS[idx]; if (!retry) T.tries = 0;
+  const T = TASKS[idx]; if (!retry && !T.started) { T.tries = 0; T.started = true; }
+  if (T.wait || T.failed) {   // this question's sound is still on its way
+    scr = 'wait'; waitRetry = retry; $('#cnt').textContent = 'Question ' + (idx + 1) + ' of ' + TASKS.length;
+    app.innerHTML = T.failed ? `<p class="err" style="margin-top:40px">The question did not load.</p><div class="row"><button class="primary" id="again">Try again</button></div>`
+      : '<p class="note" style="margin-top:50px;font-size:18px">Getting the question ready…</p><div class="bar"><i style="width:60%"></i></div>';
+    const ask = () => window.opener && !window.opener.closed && window.opener.postMessage({ type: 'elp-need', id: T.id }, ORIGIN);
+    if (T.failed) $('#again').onclick = () => { T.failed = false; T.wait = true; showTask(retry); ask(); }; else ask();
+    return;
+  }
+  scr = 'task';
   $('#cnt').textContent = 'Question ' + (idx + 1) + ' of ' + TASKS.length;
   const heard = retry || T.heard;
   app.innerHTML = `<p style="margin:0 0 6px"><b>Question ${T.n}</b> · Listen to the question. It is not written on the screen.${heard ? ' You can listen to it again.' : ''}</p>
@@ -127,6 +162,7 @@ function showTask(retry) {
     <div class="state" id="st">${heard ? 'Press Record when you are ready.' : 'First, listen to the question.'}</div>
     <p class="note">You have 3 tries for each question.</p>`;
   $('#listen').onclick = () => {
+    if (paused) return;
     const L = $('#listen'); L.disabled = true; L.textContent = '🔊 Listening…'; T.heard = true;
     let ended = false;
     const end = () => { if (ended) return; ended = true; const L = $('#listen'), R = $('#recb'); if (!L || !R) return;
@@ -134,7 +170,7 @@ function showTask(retry) {
     say(T.say, T.audio, end);
     setTimeout(end, 25000);   // in case the voice does not finish
   };
-  $('#recb').onclick = () => { stopVoice(); record(); };
+  $('#recb').onclick = () => { if (paused) return; stopVoice(); record(); };
 }
 
 function record() {
@@ -143,8 +179,10 @@ function record() {
   rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
   mime = rec.mimeType || mime || 'audio/webm';
   rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
-  rec.onstop = () => { recording = false; setTimeout(runQueue, 300); clearTimeout(guard); seconds = (Date.now() - started) / 1000; blob = new Blob(chunks, { type: mime }); T.tries = (T.tries || 0) + 1; review(); };
-  recording = true; rec.start(); started = Date.now();
+  rec.onstop = () => { recording = false; setTimeout(runQueue, 300); clearTimeout(guard);
+    if (discard) { discard = false; chunks = []; afterDiscard = true; return; }   // stopped by a pause: not kept, not a try
+    seconds = (Date.now() - started) / 1000; blob = new Blob(chunks, { type: mime }); T.tries = (T.tries || 0) + 1; review(); };
+  recording = true; rec.start(); started = Date.now(); scr = 'rec';
   $('#st').innerHTML = '<span class="rec">● Recording. Speak now. Press Stop when you finish.</span>';
   $('#btns').innerHTML = '<button class="stop" id="stop">■ Stop</button>';
   $('#stop').onclick = () => { if (rec.state === 'recording') rec.stop(); };
@@ -160,8 +198,8 @@ function review() {
     setTimeout(() => transcribeAndSend(blob, mime, seconds), 1200);
     return;
   }
-  const left = MAX_TRIES - T.tries;
-  const player = new Audio(URL.createObjectURL(blob));
+  const left = MAX_TRIES - T.tries; scr = 'review';
+  const player = revPlayer = new Audio(URL.createObjectURL(blob));
   $('#st').textContent = 'Listen to your answer. You can record ' + left + ' more ' + (left === 1 ? 'time' : 'times') + '.';
   $('#btns').innerHTML = `<button class="ghost" id="play">▶ Listen to my answer</button>
     <button class="ghost" id="again">Record again</button><button class="primary" id="use">Use this answer</button>`;
